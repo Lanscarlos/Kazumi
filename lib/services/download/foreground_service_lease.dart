@@ -24,9 +24,14 @@ class ForegroundServiceLease {
   Future<bool> acquire(String owner) async {
     _owners.add(owner);
     if (_running) return true;
-    final started = await (_starting ??= _startPlatform());
-    if (!started) _owners.remove(owner);
-    return started && _running;
+    try {
+      final started = await (_starting ??= _startPlatform());
+      if (!started) _owners.remove(owner);
+      return started && _running;
+    } catch (_) {
+      _owners.remove(owner);
+      rethrow;
+    }
   }
 
   /// Unregisters [owner]; the service stops when no owner remains.

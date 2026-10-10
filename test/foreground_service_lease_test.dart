@@ -7,10 +7,13 @@ class _FakeService {
   int starts = 0;
   int stops = 0;
   bool startResult = true;
+  Object? startError;
   Completer<bool>? pendingStart;
 
   Future<bool> start() {
     starts++;
+    final error = startError;
+    if (error != null) return Future.error(error);
     return pendingStart?.future ?? Future.value(startResult);
   }
 
@@ -59,6 +62,20 @@ void main() {
     service.startResult = true;
     expect(await lease.acquire('download'), isTrue);
     expect(service.starts, 2);
+  });
+
+  test('a throwing start drops the owner so a later acquire retries', () async {
+    final service = _FakeService()..startError = StateError('start failed');
+    final lease = service.lease();
+
+    await expectLater(lease.acquire('download'), throwsA(isA<StateError>()));
+    expect(lease.holds('download'), isFalse);
+    expect(lease.isRunning, isFalse);
+
+    service.startError = null;
+    expect(await lease.acquire('download'), isTrue);
+    expect(service.starts, 2);
+    expect(lease.isRunning, isTrue);
   });
 
   test('concurrent acquires share one platform start', () async {
