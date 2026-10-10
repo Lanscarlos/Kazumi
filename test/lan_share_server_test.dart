@@ -223,6 +223,50 @@ void main() {
     }
   });
 
+  test('symlinks inside the episode directory are never served', () async {
+    final token = await pair();
+    final outside = File(path.join(root.path, 'secret.ts'));
+    await outside.writeAsBytes(bytesOf(32));
+    final directory = path.join(root.path, 'phone', '123_source', '1');
+    await Link(path.join(directory, 'link.ts')).create(outside.path);
+
+    final (status, body, _) = await send(
+        'GET', LanShareProtocol.episodeFilePath,
+        query: episode(1, 'link.ts'), token: token);
+    expect(status, HttpStatus.badRequest);
+    expect((body as Map)['error'], LanShareErrorCode.badName);
+  });
+
+  test('oversized pairing bodies are refused without counting as failures',
+      () async {
+    final original = server.pairingCode;
+    final request = await http.openUrl(
+      'POST',
+      Uri(
+        scheme: 'http',
+        host: '127.0.0.1',
+        port: server.boundPort,
+        path: LanShareProtocol.pairPath,
+      ),
+    );
+    request.headers.contentType = ContentType.json;
+    request.write(jsonEncode({'code': original, 'padding': 'x' * 10000}));
+    final response = await request.close();
+    final body = jsonDecode(await utf8.decodeStream(response)) as Map;
+    expect(response.statusCode, HttpStatus.requestEntityTooLarge);
+    expect(body['error'], LanShareErrorCode.badRequest);
+    expect(server.pairingCode, original);
+
+    // Not counted as a failure: the full failure budget is still available.
+    final wrong = original == '000000' ? '111111' : '000000';
+    for (var i = 1; i < LanShareProtocol.maxPairFailures; i++) {
+      final (status, _, _) =
+          await send('POST', LanShareProtocol.pairPath, body: {'code': wrong});
+      expect(status, HttpStatus.unauthorized);
+    }
+    expect(server.pairingCode, original);
+  });
+
   test('unfinished or unknown episodes are not found', () async {
     final token = await pair();
     for (final query in [

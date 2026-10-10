@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:kazumi/modules/download/download_module.dart';
 import 'package:kazumi/repositories/download_repository.dart';
@@ -31,6 +32,8 @@ String localDeviceName() {
   return host.isEmpty || host == 'localhost' ? os : '$os · $host';
 }
 
+class _RequestTooLarge implements Exception {}
+
 typedef _SharedEpisode = ({
   DownloadRecord record,
   int episodeNumber,
@@ -59,6 +62,9 @@ class LanShareServer {
   final Random _random;
 
   static final _rangePattern = RegExp(r'^bytes=(\d+)-$');
+
+  /// Upper bound for the (unauthenticated) pairing request body.
+  static const _maxJsonBodyBytes = 4 * 1024;
 
   HttpServer? _server;
   String _pairingCode = '';
@@ -210,7 +216,15 @@ class LanShareServer {
   }
 
   Future<void> _pair(HttpRequest request) async {
-    final body = await _readJson(request);
+    final Map<String, Object?> body;
+    try {
+      body = await _readJson(request);
+    } on _RequestTooLarge {
+      // Not a pairing attempt, so it does not count towards the failure limit.
+      await _sendError(request.response, HttpStatus.requestEntityTooLarge,
+          LanShareErrorCode.badRequest, '请求过大');
+      return;
+    }
     final code = body['code'];
     if (_pairingCode.isNotEmpty && code is String && code == _pairingCode) {
       final token = LanShareProtocol.generateToken(_random);
@@ -235,9 +249,17 @@ class LanShareServer {
         LanShareErrorCode.badCode, '配对码错误');
   }
 
+  /// Reads a small JSON object body; throws [_RequestTooLarge] past the cap.
   Future<Map<String, Object?>> _readJson(HttpRequest request) async {
+    if (request.contentLength > _maxJsonBodyBytes) throw _RequestTooLarge();
+    final bytes = BytesBuilder(copy: false);
+    await for (final chunk in request) {
+      bytes.add(chunk);
+      // Also covers chunked bodies that do not declare a length up front.
+      if (bytes.length > _maxJsonBodyBytes) throw _RequestTooLarge();
+    }
     try {
-      final decoded = jsonDecode(await utf8.decodeStream(request));
+      final decoded = jsonDecode(utf8.decode(bytes.takeBytes()));
       return decoded is Map<String, Object?> ? decoded : const {};
     } on FormatException {
       return const {};
@@ -327,11 +349,16 @@ class LanShareServer {
     }
     final name = request.uri.queryParameters['name'] ?? '';
     final directory = path.dirname(found.episode.localM3u8Path);
-    final listed = LanShareProtocol.isSafeFileName(name) &&
-        !LanShareProtocol.isTransientFileName(name) &&
-        (await _listFiles(directory)).any((file) => file.name == name);
     final file = File(path.join(directory, name));
-    if (!listed || !path.isWithin(directory, file.path)) {
+    // Checked per file (no directory scan): HLS episodes have thousands of
+    // segments. Symlinks are never served, only regular files directly in
+    // the episode directory.
+    final servable = LanShareProtocol.isSafeFileName(name) &&
+        !LanShareProtocol.isTransientFileName(name) &&
+        path.isWithin(directory, file.path) &&
+        await FileSystemEntity.type(file.path, followLinks: false) ==
+            FileSystemEntityType.file;
+    if (!servable) {
       await _sendError(response, HttpStatus.badRequest,
           LanShareErrorCode.badName, '文件名无效');
       return;
