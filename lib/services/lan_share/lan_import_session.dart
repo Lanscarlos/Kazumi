@@ -34,7 +34,7 @@ String describeLanShareError(Object error) {
       case LanShareErrorCode.badCode:
         return '配对码错误';
       case LanShareErrorCode.codeRotated:
-        return '错误次数过多，配对码已刷新，请查看共享设备上的新配对码';
+        return '错误次数过多，配对码已刷新，请稍后用共享设备上的新配对码重试';
       case LanShareErrorCode.unauthorized:
         return '共享已关闭或连接已失效，请重新输入配对码';
       case LanShareErrorCode.notFound:

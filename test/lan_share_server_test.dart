@@ -45,6 +45,7 @@ void main() {
       deviceName: 'phone',
       port: 0,
       address: InternetAddress.loopbackIPv4,
+      pairCooldown: const Duration(milliseconds: 200),
     );
     await server.start();
     http = HttpClient();
@@ -125,24 +126,70 @@ void main() {
     expect(server.connectedDevice, 'pc');
   });
 
-  test('five wrong codes replace the pairing code', () async {
-    final original = server.pairingCode;
-    final wrong = original == '000000' ? '111111' : '000000';
+  Future<(int, Object?, HttpHeaders)> tryCode(String code) =>
+      send('POST', LanShareProtocol.pairPath, body: {'code': code});
+
+  /// Sends wrong codes until the server rotates its pairing code.
+  Future<void> exhaustAttempts() async {
+    final wrong = server.pairingCode == '000000' ? '111111' : '000000';
     for (var i = 1; i < LanShareProtocol.maxPairFailures; i++) {
-      final (status, body, _) =
-          await send('POST', LanShareProtocol.pairPath, body: {'code': wrong});
+      final (status, body, _) = await tryCode(wrong);
       expect(status, HttpStatus.unauthorized);
       expect((body as Map)['error'], LanShareErrorCode.badCode);
     }
-    final (status, body, _) =
-        await send('POST', LanShareProtocol.pairPath, body: {'code': wrong});
+    final (status, body, _) = await tryCode(wrong);
     expect(status, HttpStatus.tooManyRequests);
     expect((body as Map)['error'], LanShareErrorCode.codeRotated);
+  }
+
+  test('five wrong codes replace the pairing code', () async {
+    final original = server.pairingCode;
+    await exhaustAttempts();
     expect(server.pairingCode, isNot(original));
 
-    final (retryStatus, _, _) =
-        await send('POST', LanShareProtocol.pairPath, body: {'code': original});
-    expect(retryStatus, HttpStatus.unauthorized);
+    // The old code is dead (and attempts are refused during the cooldown).
+    final (retryStatus, _, _) = await tryCode(original);
+    expect(retryStatus, isNot(HttpStatus.ok));
+  });
+
+  test('pairing is refused during the cooldown, even with the right code',
+      () async {
+    await exhaustAttempts();
+
+    final (status, body, _) = await tryCode(server.pairingCode);
+    expect(status, HttpStatus.tooManyRequests);
+    expect((body as Map)['error'], LanShareErrorCode.codeRotated);
+    expect(body['message'], '错误次数过多，请稍后再试');
+    expect(server.connectedDevice, isNull);
+
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    final (okStatus, okBody, _) = await tryCode(server.pairingCode);
+    expect(okStatus, HttpStatus.ok);
+    expect((okBody as Map)['token'], isNotEmpty);
+  });
+
+  test('the cooldown doubles with every rotation', () async {
+    await exhaustAttempts();
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    await exhaustAttempts();
+
+    // 250 ms is past the first cooldown (200 ms) but not the second (400 ms).
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    var (status, _, _) = await tryCode(server.pairingCode);
+    expect(status, HttpStatus.tooManyRequests);
+
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    (status, _, _) = await tryCode(server.pairingCode);
+    expect(status, HttpStatus.ok);
+  });
+
+  test('restarting the share resets the cooldown', () async {
+    await exhaustAttempts();
+    await server.stop();
+    await server.start();
+
+    final (status, _, _) = await tryCode(server.pairingCode);
+    expect(status, HttpStatus.ok);
   });
 
   test('manifest lists only completed episodes without danmaku', () async {

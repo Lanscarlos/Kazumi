@@ -48,6 +48,7 @@ class LanShareServer {
     this.port = LanShareProtocol.defaultPort,
     InternetAddress? address,
     Random? random,
+    this.pairCooldown = const Duration(seconds: 30),
   })  : _repository = repository,
         deviceName = deviceName ?? localDeviceName(),
         _address = address ?? InternetAddress.anyIPv4,
@@ -61,6 +62,12 @@ class LanShareServer {
   final InternetAddress _address;
   final Random _random;
 
+  /// How long pairing is refused after the first code rotation; doubles with
+  /// every further rotation (capped at [_maxPairCooldown]) until the share is
+  /// restarted. Rotating alone would not bound guesses.
+  final Duration pairCooldown;
+  static const _maxPairCooldown = Duration(minutes: 10);
+
   static final _rangePattern = RegExp(r'^bytes=(\d+)-$');
 
   /// Upper bound for the (unauthenticated) pairing request body.
@@ -69,6 +76,8 @@ class LanShareServer {
   HttpServer? _server;
   String _pairingCode = '';
   int _pairFailures = 0;
+  DateTime? _pairBlockedUntil;
+  late Duration _nextPairCooldown = pairCooldown;
   final Set<String> _tokens = {};
   String? _connectedDevice;
   int _activeTransfers = 0;
@@ -103,6 +112,8 @@ class LanShareServer {
     if (server == null) throw LanSharePortUnavailableException();
     _server = server;
     _rotatePairingCode();
+    _pairBlockedUntil = null;
+    _nextPairCooldown = pairCooldown;
     _tokens.clear();
     _connectedDevice = null;
     _bytesSent = 0;
@@ -225,6 +236,14 @@ class LanShareServer {
           LanShareErrorCode.badRequest, '请求过大');
       return;
     }
+    final blockedUntil = _pairBlockedUntil;
+    if (blockedUntil != null && DateTime.now().isBefore(blockedUntil)) {
+      // Refused without looking at the code, so guesses cannot be paced by
+      // rotating the code.
+      await _sendError(request.response, HttpStatus.tooManyRequests,
+          LanShareErrorCode.codeRotated, '错误次数过多，请稍后再试');
+      return;
+    }
     final code = body['code'];
     if (_pairingCode.isNotEmpty && code is String && code == _pairingCode) {
       final token = LanShareProtocol.generateToken(_random);
@@ -240,6 +259,10 @@ class LanShareServer {
     _pairFailures++;
     if (_pairFailures >= LanShareProtocol.maxPairFailures) {
       _rotatePairingCode();
+      _pairBlockedUntil = DateTime.now().add(_nextPairCooldown);
+      _nextPairCooldown = _nextPairCooldown * 2 > _maxPairCooldown
+          ? _maxPairCooldown
+          : _nextPairCooldown * 2;
       _notify();
       await _sendError(request.response, HttpStatus.tooManyRequests,
           LanShareErrorCode.codeRotated, '错误次数过多，配对码已刷新');
