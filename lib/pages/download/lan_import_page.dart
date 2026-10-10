@@ -243,6 +243,14 @@ class _LanImportPageState extends State<LanImportPage> {
         );
       }
       await session.run();
+    } catch (e, stackTrace) {
+      // Keep errors from escaping as unhandled async errors; the finally block
+      // still moves the page to the finished state.
+      KazumiLogger().w(
+        'LanImportPage: import session failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
     } finally {
       _speedTicker?.cancel();
       _speedTicker = null;
@@ -286,7 +294,9 @@ class _LanImportPageState extends State<LanImportPage> {
     _session = null;
     _selected.clear();
     _states.clear();
-    _code.clear();
+    // Only a rejected code needs retyping; after a connection failure the
+    // typed code may still be valid.
+    if (stopCode == LanShareErrorCode.unauthorized) _code.clear();
     setState(() {
       _error = stopCode == null
           ? null

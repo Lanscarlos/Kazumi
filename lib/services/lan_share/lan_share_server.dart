@@ -49,10 +49,17 @@ class LanShareServer {
     InternetAddress? address,
     Random? random,
     this.pairCooldown = const Duration(seconds: 30),
+    Duration Function()? elapsed,
   })  : _repository = repository,
         deviceName = deviceName ?? localDeviceName(),
         _address = address ?? InternetAddress.anyIPv4,
-        _random = random ?? Random.secure();
+        _random = random ?? Random.secure(),
+        _elapsed = elapsed ?? _monotonicClock();
+
+  static Duration Function() _monotonicClock() {
+    final stopwatch = Stopwatch()..start();
+    return () => stopwatch.elapsed;
+  }
 
   final IDownloadRepository _repository;
   final String deviceName;
@@ -61,6 +68,10 @@ class LanShareServer {
   final int port;
   final InternetAddress _address;
   final Random _random;
+
+  /// Monotonic time since an arbitrary start, so the pairing cooldown is not
+  /// affected by wall-clock changes. Injectable for tests.
+  final Duration Function() _elapsed;
 
   /// How long pairing is refused after the first code rotation; doubles with
   /// every further rotation (capped at [_maxPairCooldown]) until the share is
@@ -76,7 +87,7 @@ class LanShareServer {
   HttpServer? _server;
   String _pairingCode = '';
   int _pairFailures = 0;
-  DateTime? _pairBlockedUntil;
+  Duration? _pairBlockedUntil;
   late Duration _nextPairCooldown = pairCooldown;
   final Set<String> _tokens = {};
   String? _connectedDevice;
@@ -237,7 +248,7 @@ class LanShareServer {
       return;
     }
     final blockedUntil = _pairBlockedUntil;
-    if (blockedUntil != null && DateTime.now().isBefore(blockedUntil)) {
+    if (blockedUntil != null && _elapsed() < blockedUntil) {
       // Refused without looking at the code, so guesses cannot be paced by
       // rotating the code.
       await _sendError(request.response, HttpStatus.tooManyRequests,
@@ -259,7 +270,7 @@ class LanShareServer {
     _pairFailures++;
     if (_pairFailures >= LanShareProtocol.maxPairFailures) {
       _rotatePairingCode();
-      _pairBlockedUntil = DateTime.now().add(_nextPairCooldown);
+      _pairBlockedUntil = _elapsed() + _nextPairCooldown;
       _nextPairCooldown = _nextPairCooldown * 2 > _maxPairCooldown
           ? _maxPairCooldown
           : _nextPairCooldown * 2;

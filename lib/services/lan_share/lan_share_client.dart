@@ -16,7 +16,6 @@ class LanShareClient {
     this.idleTimeout = const Duration(seconds: 30),
   }) : _http = HttpClient()
           ..connectionTimeout = connectTimeout
-          ..idleTimeout = idleTimeout
           // LAN peers must never go through the user's internet proxy.
           ..findProxy = ((_) => 'DIRECT');
 
@@ -26,6 +25,8 @@ class LanShareClient {
 
   /// How long a peer may stay silent (no response headers, no body bytes)
   /// before the request is aborted. [connectTimeout] only covers connecting.
+  /// Enforced per request in [_exchange]; it is deliberately not applied to
+  /// `HttpClient.idleTimeout`, which only times out pooled keep-alive sockets.
   final Duration idleTimeout;
 
   /// Upper bound for JSON (and error) response bodies read into memory.
@@ -132,6 +133,8 @@ class LanShareClient {
     required String directory,
     void Function(int delta)? onBytes,
   }) async {
+    // Snapshot first so a cancel during the file checks below is honored.
+    final cancelCount = _cancelCount;
     if (!LanShareProtocol.isSafeFileName(file.name)) {
       throw LanShareException(
           LanShareErrorCode.badName, '文件名无效：${file.name}');
@@ -154,6 +157,7 @@ class LanShareClient {
       await _exchange(
         'GET',
         LanShareProtocol.episodeFilePath,
+        cancelCount: cancelCount,
         query: {
           ...LanShareProtocol.episodeQuery(recordKey, episodeNumber),
           'name': file.name,
@@ -280,7 +284,12 @@ class LanShareClient {
       HttpClientResponse response, Stream<List<int>> body) async {
     const tooLarge =
         LanShareException(LanShareErrorCode.badRequest, '对方返回的数据过大');
-    if (response.contentLength > maxJsonBodyBytes) throw tooLarge;
+    if (response.contentLength > maxJsonBodyBytes) {
+      // Nothing listens to the body yet; cancelling a subscription on it
+      // closes the socket instead of leaving the oversized response open.
+      await response.listen(null).cancel();
+      throw tooLarge;
+    }
     final bytes = BytesBuilder(copy: false);
     await for (final chunk in body) {
       bytes.add(chunk);
@@ -292,7 +301,8 @@ class LanShareClient {
   /// Runs one request. [consume] reads the response through [body], which
   /// fails with a [TimeoutException] once the peer is silent for
   /// [idleTimeout]; its `isCancelled` reports whether [cancelActive] ran since
-  /// this call started.
+  /// this call started. [cancelCount] is the [_cancelCount] snapshot to compare
+  /// against; it defaults to one taken when this call starts.
   Future<T> _exchange<T>(
     String method,
     String route, {
@@ -303,8 +313,9 @@ class LanShareClient {
     Object? body,
     bool auth = true,
     Map<String, String> headers = const {},
+    int? cancelCount,
   }) async {
-    final cancelCount = _cancelCount;
+    final startCount = cancelCount ?? _cancelCount;
     final uri = Uri(
         scheme: 'http',
         host: host,
@@ -325,7 +336,7 @@ class LanShareClient {
     try {
       // cancelActive() may have run while the connection was opening, when
       // this request was not registered yet.
-      if (_cancelCount != cancelCount) {
+      if (_cancelCount != startCount) {
         request.abort(_cancelled);
         throw _cancelled;
       }
@@ -344,7 +355,7 @@ class LanShareClient {
       final result = await consume(
         response,
         response.timeout(idleTimeout),
-        () => _cancelCount != cancelCount,
+        () => _cancelCount != startCount,
       );
       // An aborted body just ends early, so consume may "succeed" on partial
       // data; the cancellation wins regardless.
@@ -355,11 +366,6 @@ class LanShareClient {
       if (e is TimeoutException) {
         request.abort(_stalled);
         throw _stalled;
-      }
-      if (e is LanShareException) {
-        // Stop reading a response we gave up on (oversized, bad status).
-        request.abort(e);
-        rethrow;
       }
       if (e is SocketException) {
         throw LanShareException(

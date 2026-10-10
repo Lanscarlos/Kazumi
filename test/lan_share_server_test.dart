@@ -15,9 +15,12 @@ void main() {
   late MemoryDownloadRepository phone;
   late LanShareServer server;
   late HttpClient http;
+  // Drives the server's monotonic cooldown clock; tests advance it explicitly.
+  var now = Duration.zero;
   final segment = bytesOf(1000);
 
   setUp(() async {
+    now = Duration.zero;
     Logger.level = Level.off;
     root = await Directory.systemTemp.createTemp('kazumi_lan_server_');
     final base = path.join(root.path, 'phone');
@@ -45,7 +48,8 @@ void main() {
       deviceName: 'phone',
       port: 0,
       address: InternetAddress.loopbackIPv4,
-      pairCooldown: const Duration(milliseconds: 200),
+      pairCooldown: const Duration(seconds: 30),
+      elapsed: () => now,
     );
     await server.start();
     http = HttpClient();
@@ -147,9 +151,13 @@ void main() {
     await exhaustAttempts();
     expect(server.pairingCode, isNot(original));
 
-    // The old code is dead (and attempts are refused during the cooldown).
-    final (retryStatus, _, _) = await tryCode(original);
-    expect(retryStatus, isNot(HttpStatus.ok));
+    // The old code is dead: once the cooldown has elapsed it is rejected as a
+    // plain wrong code instead of pairing.
+    now += const Duration(seconds: 31);
+    final (retryStatus, retryBody, _) = await tryCode(original);
+    expect(retryStatus, HttpStatus.unauthorized);
+    expect((retryBody as Map)['error'], LanShareErrorCode.badCode);
+    expect(server.connectedDevice, isNull);
   });
 
   test('pairing is refused during the cooldown, even with the right code',
@@ -162,7 +170,11 @@ void main() {
     expect(body['message'], '错误次数过多，请稍后再试');
     expect(server.connectedDevice, isNull);
 
-    await Future<void>.delayed(const Duration(milliseconds: 250));
+    now += const Duration(seconds: 29);
+    final (stillStatus, _, _) = await tryCode(server.pairingCode);
+    expect(stillStatus, HttpStatus.tooManyRequests);
+
+    now += const Duration(seconds: 2);
     final (okStatus, okBody, _) = await tryCode(server.pairingCode);
     expect(okStatus, HttpStatus.ok);
     expect((okBody as Map)['token'], isNotEmpty);
@@ -170,15 +182,15 @@ void main() {
 
   test('the cooldown doubles with every rotation', () async {
     await exhaustAttempts();
-    await Future<void>.delayed(const Duration(milliseconds: 250));
+    now += const Duration(seconds: 31);
     await exhaustAttempts();
 
-    // 250 ms is past the first cooldown (200 ms) but not the second (400 ms).
-    await Future<void>.delayed(const Duration(milliseconds: 250));
+    // 31 s is past the first cooldown (30 s) but not the second (60 s).
+    now += const Duration(seconds: 31);
     var (status, _, _) = await tryCode(server.pairingCode);
     expect(status, HttpStatus.tooManyRequests);
 
-    await Future<void>.delayed(const Duration(milliseconds: 300));
+    now += const Duration(seconds: 30);
     (status, _, _) = await tryCode(server.pairingCode);
     expect(status, HttpStatus.ok);
   });
