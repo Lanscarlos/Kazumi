@@ -51,7 +51,7 @@ class _LanSharePageState extends State<LanSharePage> {
           _busy = false;
           _error = e is LanSharePortUnavailableException
               ? e.toString()
-              : '无法开启共享：$e';
+              : '无法开启共享，请检查网络后重试';
         });
       }
       return;
@@ -73,22 +73,46 @@ class _LanSharePageState extends State<LanSharePage> {
       _addresses = addresses;
       _busy = false;
     });
-    if (await _background.acquire(BackgroundDownloadService.lanShareOwner)) {
-      await _background.updateNotification(
-          title: '局域网共享中', text: '保持此页面打开，其他设备即可导入缓存');
+    // Sharing still works without the foreground service, so failures here
+    // are logged and otherwise ignored.
+    try {
+      if (await _background.acquire(BackgroundDownloadService.lanShareOwner)) {
+        await _background.updateNotification(
+            title: '局域网共享中', text: '保持此页面打开，其他设备即可导入缓存');
+      }
+    } catch (e) {
+      KazumiLogger().w('LanSharePage: failed to hold foreground service',
+          error: e);
     }
   }
 
   Future<void> _stopSharing() async {
     final server = _server;
     _server = null;
+    // Keep the switch disabled until the server is fully down, so a new start
+    // cannot overlap with this stop.
+    _busy = true;
+    if (mounted) setState(() {});
     _ticker?.cancel();
     _ticker = null;
     await _serverChanges?.cancel();
     _serverChanges = null;
-    await server?.dispose();
-    await _background.release(BackgroundDownloadService.lanShareOwner);
-    if (mounted) setState(() {});
+    try {
+      // Release before awaiting dispose so a start that begins meanwhile
+      // cannot have its hold undone by this stop.
+      await _background.release(BackgroundDownloadService.lanShareOwner);
+    } catch (e) {
+      KazumiLogger().w('LanSharePage: failed to release foreground service',
+          error: e);
+    }
+    try {
+      await server?.dispose();
+    } catch (e) {
+      KazumiLogger().w('LanSharePage: failed to stop sharing', error: e);
+    } finally {
+      _busy = false;
+      if (mounted) setState(() {});
+    }
   }
 
   @override
