@@ -26,11 +26,13 @@ class _LanSharePageState extends State<LanSharePage> {
   List<String> _addresses = const [];
   bool _busy = false;
   String? _error;
+  bool _disposed = false;
 
   bool get _sharing => _server?.isRunning ?? false;
 
   @override
   void dispose() {
+    _disposed = true;
     unawaited(_stopSharing());
     super.dispose();
   }
@@ -45,7 +47,11 @@ class _LanSharePageState extends State<LanSharePage> {
       await server.start();
     } catch (e) {
       KazumiLogger().w('LanSharePage: failed to start sharing', error: e);
-      await server.dispose();
+      try {
+        await server.dispose();
+      } catch (e) {
+        KazumiLogger().w('LanSharePage: failed to dispose server', error: e);
+      }
       if (mounted) {
         setState(() {
           _busy = false;
@@ -92,7 +98,7 @@ class _LanSharePageState extends State<LanSharePage> {
     // Keep the switch disabled until the server is fully down, so a new start
     // cannot overlap with this stop.
     _busy = true;
-    if (mounted) setState(() {});
+    if (!_disposed && mounted) setState(() {});
     _ticker?.cancel();
     _ticker = null;
     await _serverChanges?.cancel();
@@ -111,7 +117,7 @@ class _LanSharePageState extends State<LanSharePage> {
       KazumiLogger().w('LanSharePage: failed to stop sharing', error: e);
     } finally {
       _busy = false;
-      if (mounted) setState(() {});
+      if (!_disposed && mounted) setState(() {});
     }
   }
 
