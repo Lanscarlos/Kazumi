@@ -22,6 +22,13 @@ class LanShareClient {
   final String deviceName;
   final HttpClient _http;
   final Set<HttpClientRequest> _active = {};
+  // Requests cut short by [cancelActive]. Aborting only ends the response
+  // stream once headers arrived, so [_exchange] needs this to tell a
+  // cancellation from a truncated body.
+  final Set<HttpClientRequest> _aborted = {};
+  // Bumped by [cancelActive]; lets a body loop stop even when abort() does not
+  // interrupt data that was already buffered.
+  int _cancelCount = 0;
   String? _token;
 
   /// Parses `host[:port]`, defaulting to [LanShareProtocol.defaultPort].
@@ -50,11 +57,10 @@ class LanShareClient {
     final Object? json;
     try {
       json = await _requestJson('GET', LanShareProtocol.infoPath, auth: false);
-    } on FormatException {
-      throw notKazumi;
     } on LanShareException catch (e) {
       if (e.code == LanShareErrorCode.connectFailed ||
-          e.code == LanShareErrorCode.network) {
+          e.code == LanShareErrorCode.network ||
+          e.code == LanShareErrorCode.cancelled) {
         rethrow;
       }
       throw notKazumi;
@@ -106,7 +112,9 @@ class LanShareClient {
 
   /// Downloads [file] into [directory] through a `.lstmp` part file, resuming
   /// a previous attempt. [onBytes] receives byte deltas, including bytes that
-  /// were already on disk.
+  /// were already on disk. The delta is negative (`-offset`) when the server
+  /// ignores `Range` and resends the file from the start, so the running
+  /// total stays equal to the bytes actually on disk.
   Future<void> downloadFile({
     required String recordKey,
     required int episodeNumber,
@@ -143,20 +151,45 @@ class LanShareClient {
         headers: {if (offset > 0) HttpHeaders.rangeHeader: 'bytes=$offset-'},
         consume: (response) async {
           final status = response.statusCode;
+          if (status == HttpStatus.requestedRangeNotSatisfiable && offset > 0) {
+            // The part file no longer fits the source; drop it so the next
+            // attempt restarts from zero instead of failing the same way.
+            await response.drain<void>();
+            await partial.delete();
+            throw LanShareException(
+                LanShareErrorCode.sizeMismatch, '文件校验失败：${file.name}');
+          }
           if (status != HttpStatus.ok && status != HttpStatus.partialContent) {
             throw _errorFrom(status, await utf8.decodeStream(response));
           }
           final append = status == HttpStatus.partialContent;
           if (!append && offset > 0) onBytes?.call(-offset);
+          // A peer must not be able to fill the disk with more than it
+          // declared, so stop before the first byte past the expected size.
+          final expected = file.size - (append ? offset : 0);
+          var received = 0;
+          var oversize = false;
+          final cancelCount = _cancelCount;
           final sink =
               partial.openWrite(mode: append ? FileMode.append : FileMode.write);
           try {
             await for (final chunk in response) {
+              if (_cancelCount != cancelCount) break;
+              if (received + chunk.length > expected) {
+                oversize = true;
+                break;
+              }
+              received += chunk.length;
               sink.add(chunk);
               onBytes?.call(chunk.length);
             }
           } finally {
             await sink.close();
+          }
+          if (oversize) {
+            await partial.delete();
+            throw LanShareException(
+                LanShareErrorCode.sizeMismatch, '文件校验失败：${file.name}');
           }
         },
       );
@@ -179,9 +212,10 @@ class LanShareClient {
 
   /// Aborts the requests in flight; the client stays usable afterwards.
   void cancelActive() {
+    _cancelCount++;
     for (final request in _active.toList()) {
-      request.abort(
-          const LanShareException(LanShareErrorCode.cancelled, '已取消'));
+      _aborted.add(request);
+      request.abort(_cancelled);
     }
     _active.clear();
   }
@@ -190,6 +224,9 @@ class LanShareClient {
     cancelActive();
     _http.close(force: true);
   }
+
+  static const _cancelled =
+      LanShareException(LanShareErrorCode.cancelled, '已取消');
 
   static const _invalidResponse =
       LanShareException(LanShareErrorCode.badRequest, '对方返回的数据无效');
@@ -213,11 +250,15 @@ class LanShareClient {
         body: body,
         auth: auth,
         consume: (response) async {
-          final text = await utf8.decodeStream(response);
-          if (response.statusCode != HttpStatus.ok) {
-            throw _errorFrom(response.statusCode, text);
+          try {
+            final text = await utf8.decodeStream(response);
+            if (response.statusCode != HttpStatus.ok) {
+              throw _errorFrom(response.statusCode, text);
+            }
+            return jsonDecode(text);
+          } on FormatException {
+            throw _invalidResponse;
           }
-          return jsonDecode(text);
         },
       );
 
@@ -248,6 +289,8 @@ class LanShareClient {
     }
     _active.add(request);
     try {
+      // A peer must not be able to redirect our bearer token elsewhere.
+      request.followRedirects = false;
       final token = _token;
       if (auth && token != null) {
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
@@ -257,13 +300,25 @@ class LanShareClient {
         request.headers.contentType = ContentType.json;
         request.write(jsonEncode(body));
       }
-      return await consume(await request.close());
-    } on SocketException catch (e) {
-      throw LanShareException(LanShareErrorCode.network, '网络中断（${e.message}）');
-    } on HttpException catch (e) {
-      throw LanShareException(LanShareErrorCode.network, '网络中断（${e.message}）');
+      final result = await consume(await request.close());
+      // An aborted body just ends early, so consume may "succeed" on partial
+      // data; the cancellation wins regardless.
+      if (_aborted.contains(request)) throw _cancelled;
+      return result;
+    } on Object catch (e) {
+      if (_aborted.contains(request)) throw _cancelled;
+      if (e is SocketException) {
+        throw LanShareException(
+            LanShareErrorCode.network, '网络中断（${e.message}）');
+      }
+      if (e is HttpException) {
+        throw LanShareException(
+            LanShareErrorCode.network, '网络中断（${e.message}）');
+      }
+      rethrow;
     } finally {
       _active.remove(request);
+      _aborted.remove(request);
     }
   }
 

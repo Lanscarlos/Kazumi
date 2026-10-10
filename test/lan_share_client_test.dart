@@ -170,4 +170,96 @@ void main() {
       throwsA(_code(LanShareErrorCode.badName)),
     );
   });
+
+  group('failure handling', () {
+    // Writes a file straight into the served episode directory.
+    Future<void> serveExtra(String name, List<int> bytes) => File(path.join(
+            root.path, 'phone', '123_source', '1', name))
+        .writeAsBytes(bytes);
+
+    test('cancelActive during a transfer throws cancelled and keeps the part',
+        () async {
+      const size = 8 * 1024 * 1024;
+      final big = bytesOf(size, seed: 5);
+      await serveExtra('big.bin', big);
+      await client.pair(server.pairingCode);
+      const bigFile = LanShareFile(name: 'big.bin', size: size);
+      final part = File(path.join(target, 'big.bin.lstmp'));
+
+      var cancelled = false;
+      await expectLater(
+        client.downloadFile(
+          recordKey: 'source_123',
+          episodeNumber: 1,
+          file: bigFile,
+          directory: target,
+          onBytes: (delta) {
+            if (delta > 0 && !cancelled) {
+              cancelled = true;
+              client.cancelActive();
+            }
+          },
+        ),
+        throwsA(_code(LanShareErrorCode.cancelled)),
+      );
+
+      expect(part.existsSync(), isTrue);
+      expect(part.lengthSync(), allOf(greaterThan(0), lessThan(size)));
+
+      // The client stays usable and the next attempt resumes the part file.
+      expect(await download(file: bigFile), size);
+      expect(await File(path.join(target, 'big.bin')).readAsBytes(), big);
+    });
+
+    test('a peer sending more than the declared size is cut off', () async {
+      final greedy = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      greedy.listen((request) async {
+        try {
+          request.response.contentLength = 1 << 20;
+          request.response.add(bytesOf(1 << 20));
+          await request.response.close();
+        } catch (_) {
+          // The client hangs up once it has seen enough.
+        }
+      });
+      addTearDown(() => greedy.close(force: true));
+      final stranger = LanShareClient(
+          host: '127.0.0.1', port: greedy.port, deviceName: 'pc');
+      addTearDown(stranger.close);
+
+      var reported = 0;
+      await expectLater(
+        stranger.downloadFile(
+          recordKey: 'source_123',
+          episodeNumber: 1,
+          file: const LanShareFile(name: 'seg_00000.ts', size: 1000),
+          directory: target,
+          onBytes: (delta) => reported += delta,
+        ),
+        throwsA(_code(LanShareErrorCode.sizeMismatch)),
+      );
+      // Nothing beyond the declared size ever reached the disk.
+      expect(reported, lessThanOrEqualTo(1000));
+      expect(File(path.join(target, 'seg_00000.ts.lstmp')).existsSync(), isFalse);
+      expect(File(path.join(target, 'seg_00000.ts')).existsSync(), isFalse);
+    });
+
+    test('a 416 for the part file drops it so a retry restarts from zero',
+        () async {
+      await client.pair(server.pairingCode);
+      // The declared size is larger than what the peer really has, so the
+      // part file (a complete copy) is out of range for the server.
+      const lying = LanShareFile(name: 'seg_00000.ts', size: 2000);
+      final part = File(path.join(target, 'seg_00000.ts.lstmp'));
+      await part.writeAsBytes(segment);
+
+      await expectLater(
+          download(file: lying), throwsA(_code(LanShareErrorCode.sizeMismatch)));
+      expect(part.existsSync(), isFalse);
+
+      // The retry starts over instead of looping on the same 416.
+      expect(await download(), 1000);
+      expect(await File(path.join(target, 'seg_00000.ts')).readAsBytes(), segment);
+    });
+  });
 }
