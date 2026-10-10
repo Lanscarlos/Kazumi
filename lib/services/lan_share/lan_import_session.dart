@@ -96,70 +96,94 @@ class LanImportSession {
   final _changes = StreamController<void>.broadcast();
   bool _cancelled = false;
   bool _running = false;
+  String? _stopCode;
   DateTime _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
 
   Stream<void> get changes => _changes.stream;
   bool get isCancelled => _cancelled;
   bool get isRunning => _running;
+
+  /// The [LanShareErrorCode] that made the session give up on the remaining
+  /// episodes (`unauthorized` or `connectFailed`), if any.
+  String? get stopCode => _stopCode;
   int get doneBytes => items.fold(0, (sum, item) => sum + item.doneBytes);
-  int get totalBytes => items.fold(0, (sum, item) => sum + item.totalBytes);
+  /// Skipped episodes transfer nothing, so they are left out and the progress
+  /// can reach 100%.
+  int get totalBytes => items.fold(
+      0,
+      (sum, item) =>
+          item.status == LanImportStatus.skipped ? sum : sum + item.totalBytes);
 
   Future<void> run() async {
     if (_running) throw StateError('LanImportSession is already running');
     _running = true;
+    _stopCode = null;
     String? stopReason;
-    for (final item in items) {
-      if (_cancelled) break;
-      if (stopReason != null) {
-        item
-          ..status = LanImportStatus.failed
-          ..error = stopReason;
-        continue;
-      }
-      final number = item.episode.episodeNumber;
-      final state = _importer.localState(item.record, number);
-      if (!state.importable) {
-        item
-          ..status = LanImportStatus.skipped
-          ..error = state == LocalEpisodeState.completed ? '本地已存在' : '本地正在下载';
-        _notify();
-        continue;
-      }
-      item
-        ..status = LanImportStatus.transferring
-        ..error = null
-        ..doneBytes = 0;
-      _notify();
-      try {
-        await _importEpisode(item, state);
-        item.status = LanImportStatus.done;
-        _notify();
-        onEpisodeImported?.call();
-      } catch (e, stackTrace) {
-        if (_cancelled) {
-          item.status = LanImportStatus.waiting;
-          break;
+    try {
+      for (final item in items) {
+        if (_cancelled) break;
+        if (stopReason != null) {
+          item
+            ..status = LanImportStatus.failed
+            ..error = stopReason;
+          continue;
+        }
+        final number = item.episode.episodeNumber;
+        final state = _importer.localState(item.record, number);
+        if (!state.importable) {
+          item
+            ..status = LanImportStatus.skipped
+            ..error = state == LocalEpisodeState.completed ? '本地已存在' : '本地正在下载';
+          _notify();
+          continue;
         }
         item
-          ..status = LanImportStatus.failed
-          ..error = describeLanShareError(e);
-        if (e is LanShareInsufficientStorageException) {
-          stopReason = '已停止：磁盘空间不足';
-        } else if (e is LanShareException) {
-          if (e.code == LanShareErrorCode.unauthorized) {
-            stopReason = '已停止：共享已关闭，请重新连接';
-          } else if (e.code == LanShareErrorCode.connectFailed) {
-            stopReason = '已停止：连接已断开';
+          ..status = LanImportStatus.transferring
+          ..error = null
+          ..doneBytes = 0;
+        _notify();
+        try {
+          await _importEpisode(item, state);
+          item.status = LanImportStatus.done;
+          _notify();
+        } catch (e, stackTrace) {
+          if (_cancelled) {
+            item.status = LanImportStatus.waiting;
+            break;
           }
-        } else {
-          KazumiLogger().w('LanImportSession: episode $number failed',
+          item
+            ..status = LanImportStatus.failed
+            ..error = describeLanShareError(e);
+          if (e is LanShareInsufficientStorageException) {
+            stopReason = '已停止：磁盘空间不足';
+          } else if (e is LanShareException) {
+            if (e.code == LanShareErrorCode.unauthorized) {
+              stopReason = '已停止：共享已关闭，请重新连接';
+              _stopCode = e.code;
+            } else if (e.code == LanShareErrorCode.connectFailed) {
+              stopReason = '已停止：连接已断开';
+              _stopCode = e.code;
+            }
+          } else {
+            KazumiLogger().w('LanImportSession: episode $number failed',
+                error: e, stackTrace: stackTrace);
+          }
+          _notify();
+          continue;
+        }
+        // Outside the per-item try: a failing listener must not turn an
+        // imported episode into a failed one.
+        try {
+          onEpisodeImported?.call();
+        } catch (e, stackTrace) {
+          KazumiLogger().w('LanImportSession: onEpisodeImported failed',
               error: e, stackTrace: stackTrace);
         }
-        _notify();
       }
+    } finally {
+      _running = false;
+      _notify();
     }
-    _running = false;
-    _notify();
   }
 
   void cancel() {
@@ -168,6 +192,9 @@ class LanImportSession {
     _client.cancelActive();
     _notify();
   }
+
+  static const _invalidPeerData =
+      LanShareException(LanShareErrorCode.badRequest, '对方返回的数据无效');
 
   Future<void> _importEpisode(
       LanImportItem item, LocalEpisodeState state) async {
@@ -178,16 +205,19 @@ class LanImportSession {
       await _importer.discardLocal(record, number);
     }
     final meta = await _client.fetchEpisodeMeta(record.key, number);
+    if (meta.episodeNumber != number) throw _invalidPeerData;
     final files = await _client.fetchEpisodeFiles(record.key, number);
-    if (files.any((file) =>
-        !LanShareProtocol.isSafeFileName(file.name) ||
-        LanShareProtocol.isTransientFileName(file.name))) {
+    final names = {for (final file in files) file.name};
+    if (names.length != files.length ||
+        files.any((file) =>
+            !LanShareProtocol.isSafeFileName(file.name) ||
+            LanShareProtocol.isTransientFileName(file.name))) {
       throw const LanShareException(
           LanShareErrorCode.badName, '对方返回的文件名无效');
     }
     if (!files.any((file) => file.name == meta.entryFileName)) {
       throw const LanShareException(
-          LanShareErrorCode.notFound, '共享设备上该集文件不完整');
+          LanShareErrorCode.badRequest, '共享设备上该集文件不完整');
     }
     item.totalBytes = files.fold(0, (sum, file) => sum + file.size);
     _throwIfCancelled();

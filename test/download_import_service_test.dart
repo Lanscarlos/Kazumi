@@ -230,4 +230,22 @@ void main() {
       path.join(base, '123_source', '1', 'video.mp4'),
     );
   });
+
+  test('commit refuses an entry file name that could leave the directory',
+      () async {
+    for (final entry in ['../evil.m3u8', 'a/b.m3u8', '', '..']) {
+      await expectLater(
+        service.commit(
+          record: _remote(),
+          meta: _meta(1, entry: entry),
+          directory: path.join(base, '123_source', '1'),
+          totalBytes: 1,
+        ),
+        throwsA(isA<LanShareException>()
+            .having((e) => e.code, 'code', LanShareErrorCode.badRequest)),
+        reason: entry,
+      );
+    }
+    expect(GStorage.downloads.get('source_123'), isNull);
+  });
 }

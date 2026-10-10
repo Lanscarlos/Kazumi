@@ -8,6 +8,7 @@ import 'package:kazumi/services/download/download_manager.dart';
 import 'package:kazumi/services/lan_share/download_import_service.dart';
 import 'package:kazumi/services/lan_share/lan_import_session.dart';
 import 'package:kazumi/services/lan_share/lan_share_client.dart';
+import 'package:kazumi/services/lan_share/lan_share_protocol.dart';
 import 'package:kazumi/services/lan_share/lan_share_server.dart';
 import 'package:kazumi/services/storage/storage.dart';
 import 'package:path/path.dart' as path;
@@ -200,6 +201,178 @@ void main() {
     expect(GStorage.downloads.get('source_123'), isNull);
   });
 
+  test('a restarted share (old token rejected) stops with unauthorized',
+      () async {
+    final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final port = probe.port;
+    await probe.close();
+    LanShareServer shareOn() => LanShareServer(
+          repository: phone,
+          deviceName: 'phone',
+          port: port,
+          address: InternetAddress.loopbackIPv4,
+        );
+    final first = shareOn();
+    await first.start();
+    final paired =
+        LanShareClient(host: '127.0.0.1', port: port, deviceName: 'pc');
+    addTearDown(paired.close);
+    await paired.pair(first.pairingCode);
+    final items = [
+      for (final record in (await paired.fetchManifest()).records)
+        for (final episode in record.episodes) LanImportItem(record, episode),
+    ];
+    await first.dispose();
+    final second = shareOn();
+    await second.start();
+    addTearDown(second.dispose);
+    // Let the client notice the dropped keep-alive connection.
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    final running = LanImportSession(
+      client: paired,
+      importer: importer,
+      items: items,
+      retryDelays: const [],
+      reserveBytes: 0,
+    );
+    await running.run();
+
+    expect(items.first.status, LanImportStatus.failed);
+    expect(items.first.error, describeLanShareError(
+        const LanShareException(LanShareErrorCode.unauthorized, '')));
+    expect(items.last.status, LanImportStatus.failed);
+    expect(items.last.error, '已停止：共享已关闭，请重新连接');
+    expect(running.stopCode, LanShareErrorCode.unauthorized);
+    expect(GStorage.downloads.get('source_123'), isNull);
+  });
+
+  test('a finished run without a stop reason has no stop code', () async {
+    final running = session(await allItems());
+    await running.run();
+    expect(running.stopCode, isNull);
+  });
+
+  group('peer data checks', () {
+    Future<LanImportItem> importWith(
+      _PeerClient peer,
+    ) async {
+      final record = (await client.fetchManifest()).records.single;
+      final item = LanImportItem(record, record.episodes.first);
+      await LanImportSession(
+        client: peer,
+        importer: importer,
+        items: [item],
+        retryDelays: const [],
+        reserveBytes: 0,
+      ).run();
+      return item;
+    }
+
+    _PeerClient peer({
+      LanShareEpisode Function(LanShareEpisode)? meta,
+      List<LanShareFile> Function(List<LanShareFile>)? files,
+    }) {
+      final peer = _PeerClient(
+        host: '127.0.0.1',
+        port: server.boundPort!,
+        deviceName: 'pc',
+        editMeta: meta,
+        editFiles: files,
+      );
+      addTearDown(peer.close);
+      return peer;
+    }
+
+    test('metadata for another episode number is rejected', () async {
+      final bad = peer(meta: (m) => LanShareEpisode(
+            episodeNumber: m.episodeNumber + 5,
+            episodeName: m.episodeName,
+            road: m.road,
+            totalSegments: m.totalSegments,
+            totalBytes: m.totalBytes,
+            networkM3u8Url: m.networkM3u8Url,
+            episodePageUrl: m.episodePageUrl,
+            completedAt: m.completedAt,
+            entryFileName: m.entryFileName,
+          ));
+      await bad.pair(server.pairingCode);
+
+      final item = await importWith(bad);
+
+      expect(item.status, LanImportStatus.failed);
+      expect(item.error, '对方返回的数据无效');
+      expect(GStorage.downloads.get('source_123'), isNull);
+    });
+
+    test('a file list with duplicate names is rejected', () async {
+      final bad = peer(files: (files) => [...files, files.first]);
+      await bad.pair(server.pairingCode);
+
+      final item = await importWith(bad);
+
+      expect(item.status, LanImportStatus.failed);
+      expect(item.error, '对方返回的文件名无效');
+    });
+
+    test('a file list without the entry file reports an incomplete episode',
+        () async {
+      final bad = peer(
+          files: (files) =>
+              [for (final f in files) if (f.name != 'playlist.m3u8') f]);
+      await bad.pair(server.pairingCode);
+
+      final item = await importWith(bad);
+
+      expect(item.status, LanImportStatus.failed);
+      expect(item.error, '共享设备上该集文件不完整');
+    });
+  });
+
+  test('a throwing onEpisodeImported does not fail the episode', () async {
+    final items = await allItems();
+    var calls = 0;
+    final running = session(items, onEpisodeImported: () {
+      calls++;
+      throw StateError('listener broke');
+    });
+
+    await running.run();
+
+    expect(calls, 2);
+    expect(items.map((i) => i.status), everyElement(LanImportStatus.done));
+    expect(running.isRunning, isFalse);
+  });
+
+  test('run() always clears the running flag', () async {
+    final items = await allItems();
+    final running = LanImportSession(
+      client: client,
+      importer: _ThrowingImporter(pcBase),
+      items: items,
+      retryDelays: const [],
+      reserveBytes: 0,
+    );
+
+    await expectLater(running.run(), throwsStateError);
+
+    expect(running.isRunning, isFalse);
+  });
+
+  test('skipped episodes do not count towards the total', () async {
+    final local = await writeCompletedEpisode(
+        base: pcBase, episodeNumber: 1, files: {'playlist.m3u8': [1]});
+    await GStorage.downloads.put('source_123', testRecord({1: local}));
+    final items = await allItems();
+    final running = session(items);
+
+    await running.run();
+
+    expect(items.first.status, LanImportStatus.skipped);
+    expect(running.totalBytes, items.last.totalBytes);
+    expect(running.doneBytes, running.totalBytes);
+  });
+
   test('cancelling keeps finished episodes and stops the rest', () async {
     final items = await allItems();
     late LanImportSession running;
@@ -243,4 +416,40 @@ class _FullDiskManager extends _BaseDirManager {
 
   @override
   Future<int> getAvailableStorage(String path) async => 1024;
+}
+
+class _ThrowingImporter extends DownloadImportService {
+  _ThrowingImporter(String base)
+      : super(DownloadRepository(), _BaseDirManager(base));
+
+  @override
+  LocalEpisodeState localState(LanShareRecord record, int episodeNumber) =>
+      throw StateError('storage unavailable');
+}
+
+/// A client whose episode data is altered, like a misbehaving peer.
+class _PeerClient extends LanShareClient {
+  _PeerClient({
+    required super.host,
+    required super.port,
+    required super.deviceName,
+    this.editMeta,
+    this.editFiles,
+  });
+
+  final LanShareEpisode Function(LanShareEpisode)? editMeta;
+  final List<LanShareFile> Function(List<LanShareFile>)? editFiles;
+
+  @override
+  Future<LanShareEpisode> fetchEpisodeMeta(String recordKey, int episodeNumber) async {
+    final meta = await super.fetchEpisodeMeta(recordKey, episodeNumber);
+    return editMeta?.call(meta) ?? meta;
+  }
+
+  @override
+  Future<List<LanShareFile>> fetchEpisodeFiles(
+      String recordKey, int episodeNumber) async {
+    final files = await super.fetchEpisodeFiles(recordKey, episodeNumber);
+    return editFiles?.call(files) ?? files;
+  }
 }

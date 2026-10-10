@@ -95,6 +95,11 @@ class DownloadImportService {
     required String directory,
     required int totalBytes,
   }) async {
+    // The entry file name comes from the peer and is joined into a path.
+    if (!LanShareProtocol.isSafeFileName(meta.entryFileName)) {
+      throw const LanShareException(
+          LanShareErrorCode.badRequest, '对方返回的数据无效');
+    }
     final episode = DownloadEpisode(
       meta.episodeNumber,
       meta.episodeName,
