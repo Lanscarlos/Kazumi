@@ -299,3 +299,15 @@ class LanShareFile {
 
   Map<String, Object?> toJson() => {'name': name, 'size': size};
 }
+
+/// A protocol-level failure carrying a [LanShareErrorCode].
+class LanShareException implements Exception {
+  const LanShareException(this.code, this.message, {this.statusCode});
+
+  final String code;
+  final String message;
+  final int? statusCode;
+
+  @override
+  String toString() => message;
+}
