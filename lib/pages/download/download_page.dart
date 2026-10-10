@@ -46,7 +46,34 @@ class _DownloadPageState extends State<DownloadPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: const SysAppBar(title: Text('下载管理')),
+      appBar: SysAppBar(
+        title: const Text('下载管理'),
+        actions: [
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            icon: const Icon(Icons.more_vert_rounded),
+            onSelected: (route) => context.pushNamed(route),
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: '/settings/download/lan-share',
+                child: ListTile(
+                  leading: Icon(Icons.wifi_tethering_rounded),
+                  title: Text('局域网共享'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              PopupMenuItem(
+                value: '/settings/download/lan-import',
+                child: ListTile(
+                  leading: Icon(Icons.move_to_inbox_rounded),
+                  title: Text('从其他设备导入'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
       body: Observer(builder: (context) {
         final recordKeys = downloadController.recordKeys.toList();
         _expanded.removeWhere((key, _) => !recordKeys.contains(key));
