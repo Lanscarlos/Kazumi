@@ -171,6 +171,87 @@ void main() {
     );
   });
 
+  group('stalled peers', () {
+    test('a body that stalls mid-file times out and keeps the part file',
+        () async {
+      final stalling = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      stalling.listen((request) async {
+        request.response.bufferOutput = false;
+        request.response.contentLength = 1000;
+        request.response.add(bytesOf(400));
+        await request.response.flush();
+        // Never sends the rest and never closes.
+      });
+      addTearDown(() => stalling.close(force: true));
+      final impatient = LanShareClient(
+        host: '127.0.0.1',
+        port: stalling.port,
+        deviceName: 'pc',
+        idleTimeout: const Duration(milliseconds: 300),
+      );
+      addTearDown(impatient.close);
+
+      final watch = Stopwatch()..start();
+      await expectLater(
+        impatient.downloadFile(
+          recordKey: 'source_123',
+          episodeNumber: 1,
+          file: segmentFile,
+          directory: target,
+        ),
+        throwsA(_code(LanShareErrorCode.network)),
+      );
+      expect(watch.elapsed, lessThan(const Duration(seconds: 5)));
+      final part = File(path.join(target, 'seg_00000.ts.lstmp'));
+      expect(part.lengthSync(), 400);
+    });
+
+    test('a JSON body that stalls times out', () async {
+      final stalling = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      stalling.listen((request) async {
+        request.response.bufferOutput = false;
+        request.response.contentLength = 100;
+        request.response.write('{"app":');
+        await request.response.flush();
+      });
+      addTearDown(() => stalling.close(force: true));
+      final impatient = LanShareClient(
+        host: '127.0.0.1',
+        port: stalling.port,
+        deviceName: 'pc',
+        idleTimeout: const Duration(milliseconds: 300),
+      );
+      addTearDown(impatient.close);
+
+      await expectLater(
+          impatient.fetchInfo(), throwsA(_code(LanShareErrorCode.network)));
+    });
+  });
+
+  test('a JSON response past the size cap is refused', () async {
+    final huge = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    huge.listen((request) async {
+      request.response.bufferOutput = false;
+      request.response.contentLength = 40 * 1024 * 1024;
+      request.response.add(bytesOf(1024));
+      await request.response.flush();
+    });
+    addTearDown(() => huge.close(force: true));
+    final stranger =
+        LanShareClient(host: '127.0.0.1', port: huge.port, deviceName: 'pc');
+    addTearDown(stranger.close);
+
+    await expectLater(
+        stranger.fetchManifest(), throwsA(_code(LanShareErrorCode.badRequest)));
+  });
+
+  test('cancelActive right after a call starts still cancels it', () async {
+    // The request is not registered yet while the connection is opening.
+    final pending = client.fetchInfo();
+    client.cancelActive();
+    await expectLater(pending, throwsA(_code(LanShareErrorCode.cancelled)));
+  });
+
   group('failure handling', () {
     // Writes a file straight into the served episode directory.
     Future<void> serveExtra(String name, List<int> bytes) => File(path.join(
