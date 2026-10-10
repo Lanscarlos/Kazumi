@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:flutter_modular/flutter_modular.dart';
@@ -49,29 +51,33 @@ class _DownloadPageState extends State<DownloadPage> {
       appBar: SysAppBar(
         title: const Text('下载管理'),
         actions: [
-          PopupMenuButton<String>(
-            tooltip: '更多',
-            icon: const Icon(Icons.more_vert_rounded),
-            onSelected: (route) => context.pushNamed(route),
-            itemBuilder: (context) => const [
-              PopupMenuItem(
-                value: '/settings/download/lan-share',
-                child: ListTile(
-                  leading: Icon(Icons.wifi_tethering_rounded),
-                  title: Text('局域网共享'),
-                  contentPadding: EdgeInsets.zero,
-                ),
+          // iOS cannot keep sharing alive in the background and the app does
+          // not declare the local network permission, so LAN transfer is
+          // not offered there.
+          if (!Platform.isIOS)
+            PopupMenuButton<String>(
+                tooltip: '更多',
+                icon: const Icon(Icons.more_vert_rounded),
+                onSelected: (route) => context.pushNamed(route),
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: '/settings/download/lan-share',
+                    child: ListTile(
+                      leading: Icon(Icons.wifi_tethering_rounded),
+                      title: Text('局域网共享'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: '/settings/download/lan-import',
+                    child: ListTile(
+                      leading: Icon(Icons.move_to_inbox_rounded),
+                      title: Text('从其他设备导入'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                ],
               ),
-              PopupMenuItem(
-                value: '/settings/download/lan-import',
-                child: ListTile(
-                  leading: Icon(Icons.move_to_inbox_rounded),
-                  title: Text('从其他设备导入'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-            ],
-          ),
         ],
       ),
       body: Observer(builder: (context) {

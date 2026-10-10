@@ -229,7 +229,7 @@ class _LanImportPageState extends State<LanImportPage> {
     try {
       try {
         if (await _background.acquire(
-          BackgroundDownloadService.lanShareOwner,
+          BackgroundDownloadService.lanImportOwner,
         )) {
           await _background.updateNotification(
             title: '正在从其他设备导入',
@@ -249,7 +249,7 @@ class _LanImportPageState extends State<LanImportPage> {
       unawaited(_sessionChanges?.cancel());
       _sessionChanges = null;
       try {
-        await _background.release(BackgroundDownloadService.lanShareOwner);
+        await _background.release(BackgroundDownloadService.lanImportOwner);
       } catch (e) {
         KazumiLogger().w(
           'LanImportPage: failed to release foreground service',
@@ -274,6 +274,25 @@ class _LanImportPageState extends State<LanImportPage> {
             item.status == LanImportStatus.waiting)
           LanImportItem(item.record, item.episode),
     ]);
+  }
+
+  /// The share closed or the connection dropped mid-import: go back to the
+  /// connect step, keeping the address so only the new code has to be typed.
+  void _reconnect() {
+    final stopCode = _session?.stopCode;
+    _client?.close();
+    _client = null;
+    _manifest = null;
+    _session = null;
+    _selected.clear();
+    _states.clear();
+    _code.clear();
+    setState(() {
+      _error = stopCode == null
+          ? null
+          : describeLanShareError(LanShareException(stopCode, ''));
+      _phase = _Phase.connect;
+    });
   }
 
   void _backToSelect() {
@@ -459,6 +478,8 @@ class _LanImportPageState extends State<LanImportPage> {
 
   Widget _buildSelectBar(ThemeData theme) {
     final total = _selectedBytes;
+    // Only a hint: the session does the exact check (it knows how many bytes
+    // are already on disk), so this must not block the import.
     final notEnough =
         _availableBytes >= 0 && total + _reserveBytes > _availableBytes;
     return SafeArea(
@@ -477,7 +498,7 @@ class _LanImportPageState extends State<LanImportPage> {
                   if (_availableBytes >= 0)
                     Text(
                       notEnough
-                          ? '本机剩余空间不足（剩余 ${formatBytes(_availableBytes)}）'
+                          ? '本机剩余空间可能不足（剩余 ${formatBytes(_availableBytes)}）'
                           : '本机剩余 ${formatBytes(_availableBytes)}',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: notEnough
@@ -490,7 +511,7 @@ class _LanImportPageState extends State<LanImportPage> {
             ),
             TextButton(onPressed: _disconnect, child: const Text('断开')),
             FilledButton(
-              onPressed: _selected.isEmpty || notEnough ? null : _startImport,
+              onPressed: _selected.isEmpty ? null : _startImport,
               child: const Text('开始导入'),
             ),
           ],
@@ -506,6 +527,7 @@ class _LanImportPageState extends State<LanImportPage> {
     final transferred = session.doneBytes;
     int count(LanImportStatus status) =>
         session.items.where((item) => item.status == status).length;
+    final stopped = finished && session.stopCode != null;
     final hasUnfinished = session.items.any(
       (item) =>
           item.status == LanImportStatus.failed ||
@@ -554,19 +576,30 @@ class _LanImportPageState extends State<LanImportPage> {
               spacing: 8,
               children: finished
                   ? [
-                      if (hasUnfinished)
+                      if (hasUnfinished && !stopped)
                         OutlinedButton(
                           onPressed: _retryUnfinished,
                           child: const Text('重试未完成的集'),
                         ),
-                      OutlinedButton(
-                        onPressed: _backToSelect,
-                        child: const Text('继续选择'),
-                      ),
-                      FilledButton(
-                        onPressed: () => Navigator.of(context).maybePop(),
-                        child: const Text('完成'),
-                      ),
+                      if (!stopped)
+                        OutlinedButton(
+                          onPressed: _backToSelect,
+                          child: const Text('继续选择'),
+                        ),
+                      if (stopped) ...[
+                        OutlinedButton(
+                          onPressed: () => Navigator.of(context).maybePop(),
+                          child: const Text('完成'),
+                        ),
+                        FilledButton(
+                          onPressed: _reconnect,
+                          child: const Text('重新连接'),
+                        ),
+                      ] else
+                        FilledButton(
+                          onPressed: () => Navigator.of(context).maybePop(),
+                          child: const Text('完成'),
+                        ),
                     ]
                   : [
                       OutlinedButton(

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:kazumi/services/lan_share/lan_share_protocol.dart';
 import 'package:path/path.dart' as path;

@@ -29,6 +29,7 @@ class BackgroundDownloadService {
 
   static const downloadOwner = 'download';
   static const lanShareOwner = 'lanShare';
+  static const lanImportOwner = 'lanImport';
 
   late final ForegroundServiceLease _lease = ForegroundServiceLease(
     start: _startPlatformService,
