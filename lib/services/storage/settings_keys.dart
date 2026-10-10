@@ -497,6 +497,12 @@ class SettingsKeys {
     '',
     group: SettingGroup.download,
   );
+  /// `host:port` of the device last imported from over the LAN.
+  static const lanShareLastAddress = SettingKey<String>(
+    'lanShareLastAddress',
+    '',
+    group: SettingGroup.download,
+  );
   static const shortcutDialogShown = SettingKey<bool>(
     _SettingBoxKey.shortcutDialogShown,
     false,
@@ -649,6 +655,7 @@ class SettingsKeys {
     downloadDanmaku,
     downloadDirectory,
     downloadDirectoryBookmark,
+    lanShareLastAddress,
     shortcutDialogShown,
     bangumiSyncEnable,
     bangumiAccessToken,
