@@ -1,7 +1,7 @@
 # 局域网缓存共享（多设备共享离线缓存）设计
 
 - 日期：2026-10-10
-- 状态：待审阅
+- 状态：已审阅
 
 ## 1. 背景与目标
 
@@ -42,7 +42,8 @@
 |---|---|---|---|
 | `lan_share_protocol.dart` | 两端共用 | 协议常量（版本号、默认端口、接口路径）、清单/元数据/文件列表的数据结构与 JSON 序列化、文件名校验、配对码与令牌生成规则。纯 Dart，不碰 IO | 无 |
 | `lan_share_server.dart` | 共享方 | 基于 `dart:io` 的 `HttpServer` 监听局域网端口；配对与令牌鉴权、错码锁定；读取下载记录生成清单；提供文件下载（支持 Range） | `IDownloadRepository`、文件系统 |
-| `lan_share_client.dart` | 导入方 | 连接、配对、拉取清单与单集信息；把文件下载到临时文件，校验大小后改名；支持续传、重试、取消；通过回调或流报告进度 | `dio`（项目已有） |
+| `lan_share_client.dart` | 导入方 | 连接、配对、拉取清单与单集信息；把文件下载到临时文件，校验大小后改名；支持续传和中断进行中的请求；通过回调报告字节进度 | `dart:io` 的 `HttpClient`（强制直连，绕过用户配置的代理；续传时以追加方式写入） |
+| `lan_import_session.dart` | 导入方 | 编排多集导入：逐集进行、集内并发、重试、空间检查、清理多余文件、取消，以及错误文案 | 客户端、导入服务 |
 | `download_import_service.dart` | 导入方 | 处理导入前的冲突（清掉本地失败或暂停的残留），以及导入完成后写入或合并本地 `DownloadRecord`/`DownloadEpisode`（按本地规则重建路径） | `IDownloadRepository`、`IDownloadManager` |
 
 ### 3.1 相关的小重构
@@ -89,7 +90,7 @@
 | `POST /api/v1/pair` | 否 | 见 §4.1 |
 | `GET /api/v1/manifest` | 是 | 按番剧列出**已完成**（`status == completed` 且入口文件存在）的集，详见 §4.3 |
 | `GET /api/v1/episode/meta?record=<key>&ep=<n>` | 是 | 单集的完整元数据，包含 `danmakuData` 和 `danDanBangumiID` |
-| `GET /api/v1/episode/files?record=<key>&ep=<n>` | 是 | 集目录下的文件列表 `[{"name", "size"}]`，只列普通文件，排除 `.tmp`、`.lstmp` 和子目录 |
+| `GET /api/v1/episode/files?record=<key>&ep=<n>` | 是 | 集目录下的文件列表 `{"files": [{"name", "size"}]}`，只列普通文件，排除 `.tmp`、`.lstmp`、子目录，以及不满足 §4.4 文件名规则的文件 |
 | `GET /api/v1/episode/file?record=<key>&ep=<n>&name=<文件名>` | 是 | 下载单个文件，支持 `Range: bytes=<start>-`，返回 200 或 206 |
 
 `record` 就是 `DownloadRecord.key`（`<pluginName>_<bangumiId>`），一律放在查询参数里，由 HTTP 层负责编码。
@@ -135,6 +136,7 @@
 - `name` 必须匹配 `^[A-Za-z0-9._-]+$`，不能是 `.` 或 `..`，并且必须出现在该集当前的文件列表里；否则返回 400 `bad_name`。
 - 服务端只拼接"集目录 + 文件名"来读取文件，然后再确认解析后的路径仍然在集目录内。
 - 只提供已完成的集的文件，不暴露其他任何路径。
+- 导入方同样会校验：对方返回的文件名必须满足上述规则；插件名不能包含路径分隔符或 Windows 不允许的字符（`/ \ : * ? " < > |` 和控制字符），并且拼出来的集目录必须位于本地下载根目录之内。否则这一集失败，不写入任何文件。
 
 ## 5. 导入流程（导入方）
 
