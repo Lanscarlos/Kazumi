@@ -177,7 +177,9 @@ abstract class _DownloadController with Store {
   }
 
   Future<void> _updateBackgroundNotification() async {
-    if (!_backgroundService.isRunning) return;
+    if (!_backgroundService.holds(BackgroundDownloadService.downloadOwner)) {
+      return;
+    }
 
     final stats = _getDownloadStats();
     if (!stats.hasWork) {
@@ -199,7 +201,10 @@ abstract class _DownloadController with Store {
   }
 
   Future<void> _startBackgroundServiceIfNeeded() async {
-    if (!_backgroundService.isSupported || _backgroundService.isRunning) return;
+    if (!_backgroundService.isSupported ||
+        _backgroundService.holds(BackgroundDownloadService.downloadOwner)) {
+      return;
+    }
 
     final started = await _backgroundService.startService();
     if (started) {

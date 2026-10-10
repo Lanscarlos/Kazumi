@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:kazumi/services/download/foreground_service_lease.dart';
 import 'package:kazumi/services/logging/logger.dart';
 
 /// Android 后台下载服务
@@ -17,7 +18,6 @@ class BackgroundDownloadService {
   BackgroundDownloadService._internal();
 
   bool _isInitialized = false;
-  bool _isRunning = false;
 
   void Function()? onPauseAll;
   void Function()? onNavigateToDownloadRequested;
@@ -26,7 +26,35 @@ class BackgroundDownloadService {
   Future<bool> Function()? onNotificationPermissionRequired;
 
   bool get isSupported => Platform.isAndroid;
-  bool get isRunning => _isRunning;
+
+  static const downloadOwner = 'download';
+  static const lanShareOwner = 'lanShare';
+
+  late final ForegroundServiceLease _lease = ForegroundServiceLease(
+    start: _startPlatformService,
+    stop: _stopPlatformService,
+  );
+
+  bool get isRunning => _lease.isRunning;
+
+  bool holds(String owner) => _lease.holds(owner);
+
+  /// Keeps the foreground service alive on behalf of [owner].
+  Future<bool> acquire(String owner) async {
+    if (!isSupported) return false;
+    return _lease.acquire(owner);
+  }
+
+  /// Drops [owner]'s hold; the service stops once nobody holds it.
+  Future<void> release(String owner) async {
+    if (!isSupported) return;
+    await _lease.release(owner);
+  }
+
+  Future<bool> startService() => acquire(downloadOwner);
+
+  Future<void> stopService() => release(downloadOwner);
+
   Future<void> init() async {
     if (!isSupported || _isInitialized) return;
 
@@ -70,10 +98,7 @@ class BackgroundDownloadService {
     return result == NotificationPermission.granted;
   }
 
-  Future<bool> startService() async {
-    if (!isSupported) return false;
-    if (_isRunning) return true;
-
+  Future<bool> _startPlatformService() async {
     if (!_isInitialized) {
       await init();
     }
@@ -112,15 +137,15 @@ class BackgroundDownloadService {
         callback: _backgroundCallback,
       );
 
-      _isRunning = result is ServiceRequestSuccess;
+      final started = result is ServiceRequestSuccess;
 
-      if (_isRunning) {
+      if (started) {
         KazumiLogger().i('BackgroundDownloadService: service started');
       } else {
         KazumiLogger().w(
             'BackgroundDownloadService: service start returned non-success: $result');
       }
-      return _isRunning;
+      return started;
     } catch (e) {
       KazumiLogger()
           .e('BackgroundDownloadService: failed to start service', error: e);
@@ -128,12 +153,9 @@ class BackgroundDownloadService {
     }
   }
 
-  Future<void> stopService() async {
-    if (!isSupported || !_isRunning) return;
-
+  Future<void> _stopPlatformService() async {
     try {
       await FlutterForegroundTask.stopService();
-      _isRunning = false;
       KazumiLogger().i('BackgroundDownloadService: service stopped');
     } catch (e) {
       KazumiLogger()
@@ -145,7 +167,7 @@ class BackgroundDownloadService {
     required String title,
     required String text,
   }) async {
-    if (!isSupported || !_isRunning) return;
+    if (!isSupported || !isRunning) return;
 
     try {
       await FlutterForegroundTask.updateService(
@@ -163,7 +185,7 @@ class BackgroundDownloadService {
     required double overallProgress,
     required String speedText,
   }) async {
-    if (!isSupported || !_isRunning) return;
+    if (!isSupported || !isRunning) return;
 
     String title;
     String text;
