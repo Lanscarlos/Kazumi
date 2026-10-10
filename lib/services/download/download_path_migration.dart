@@ -41,10 +41,11 @@ Future<void> _rebaseDownloadPaths(
         continue;
       }
 
-      final directory = path.join(
+      final directory = downloadEpisodeDirectory(
         downloadBase,
-        '${record.bangumiId}_${record.pluginName}',
-        '${entry.key}',
+        record.bangumiId,
+        record.pluginName,
+        entry.key,
       );
       final videoPath = episode.localM3u8Path.isEmpty
           ? ''

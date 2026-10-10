@@ -14,6 +14,15 @@ Future<String> getDefaultDownloadDirectory() async {
   return path.join(appSupport.path, 'downloads');
 }
 
+/// Directory holding one downloaded episode. Downloads, path migration and
+/// LAN imports must all agree on this layout.
+String downloadEpisodeDirectory(
+  String downloadBase,
+  int bangumiId,
+  String pluginName,
+  int episodeNumber,
+) => path.join(downloadBase, '${bangumiId}_$pluginName', '$episodeNumber');
+
 Future<void> ensureDirectoryWritable(String directoryPath) async {
   final directory = Directory(directoryPath);
   await directory.create(recursive: true);

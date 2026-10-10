@@ -107,6 +107,13 @@ abstract class IDownloadManager {
   Future<void> deleteRecordFiles(int bangumiId, String pluginName,
       {DownloadRecord? record});
   double getSpeed(String recordKey, int episodeNumber);
+
+  /// Base directory new downloads are written to: the custom directory when
+  /// set and usable, otherwise the default one.
+  Future<String> resolveDownloadBaseDir();
+
+  /// Available bytes on the volume holding [path], or -1 when unknown.
+  Future<int> getAvailableStorage(String path);
 }
 
 class _SpeedTracker {
@@ -160,7 +167,8 @@ class DownloadManager implements IDownloadManager {
   }
 
   /// Returns available bytes, or -1 if unable to determine
-  Future<int> _getAvailableStorage(String path) async {
+  @override
+  Future<int> getAvailableStorage(String path) async {
     try {
       final result = await _storageChannel.invokeMethod<int>(
         'getAvailableStorage',
@@ -177,7 +185,7 @@ class DownloadManager implements IDownloadManager {
 
   Future<void> _checkStorageSpace(String downloadDir,
       {int requiredBytes = 0}) async {
-    final available = await _getAvailableStorage(downloadDir);
+    final available = await getAvailableStorage(downloadDir);
     if (available == -1) return; // Skip check if unable to determine
 
     final required = requiredBytes > 0 ? requiredBytes : _minRequiredSpace;
@@ -215,7 +223,8 @@ class DownloadManager implements IDownloadManager {
   bool isDownloading(String recordKey, int episodeNumber) =>
       _activeTasks.containsKey(_taskKey(recordKey, episodeNumber));
 
-  Future<String> get _downloadBaseDir async {
+  @override
+  Future<String> resolveDownloadBaseDir() async {
     if (supportsCustomDownloadDirectory) {
       final customDir =
           GStorage.getSetting(SettingsKeys.downloadDirectory).trim();
@@ -231,12 +240,6 @@ class DownloadManager implements IDownloadManager {
     return getDefaultDownloadDirectory();
   }
 
-  String _getEpisodeDir(String downloadBase, int bangumiId, String pluginName,
-      int episodeNumber) {
-    return path.join(
-        downloadBase, '${bangumiId}_$pluginName', '$episodeNumber');
-  }
-
   /// Resolves the episode directory (kept from a previous attempt if any),
   /// verifies it is writable, and persists it on the episode.
   Future<String> _prepareEpisodeDir(
@@ -248,8 +251,12 @@ class DownloadManager implements IDownloadManager {
     final storedDir = episode.downloadDirectory.trim();
     final episodeDir = storedDir.isNotEmpty
         ? storedDir
-        : _getEpisodeDir(
-            await _downloadBaseDir, bangumiId, pluginName, episodeNumber);
+        : downloadEpisodeDirectory(
+            await resolveDownloadBaseDir(),
+            bangumiId,
+            pluginName,
+            episodeNumber,
+          );
     await ensureDirectoryWritable(episodeDir);
     episode.downloadDirectory = episodeDir;
     await _checkStorageSpace(episodeDir);
@@ -266,8 +273,12 @@ class DownloadManager implements IDownloadManager {
   ) async {
     final storedDir = episode?.downloadDirectory.trim() ?? '';
     if (storedDir.isNotEmpty) return storedDir;
-    return _getEpisodeDir(await getDefaultDownloadDirectory(), bangumiId,
-        pluginName, episodeNumber);
+    return downloadEpisodeDirectory(
+      await getDefaultDownloadDirectory(),
+      bangumiId,
+      pluginName,
+      episodeNumber,
+    );
   }
 
   @override
